@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "livingvillages",
+  "version": "${version}",
+  "name": "Living Villages",
+  "description": "Makes villages feel alive. Villagers have conversations, react to weather, gather at campfires, greet you, flee threats, and much more.",
+  "authors": [
+    "Marew"
+  ],
+  "contact": {},
+  "license": "MIT",
+  "icon": "assets/livingvillages/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.livingvillages.LivingVillages"
+    ],
+    "client": [
+      "com.livingvillages.LivingVillagesClient"
+    ],
+    "modmenu": [
+      "com.livingvillages.ModMenuIntegration"
+    ]
+  },
+  "mixins": [
+    "livingvillages.mixins.json",
+    "livingvillages.client.mixins.json",
+    "livingvillages.compat.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.14.0",
+    "minecraft": "~1.20.1",
+    "java": ">=17",
+    "fabric-api": "*",
+    "cloth-config": "*"
+  },
+  "suggests": {
+    "modmenu": "*",
+    "guardvillagers": "*"
+  }
+}

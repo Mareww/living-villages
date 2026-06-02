@@ -1,0 +1,59 @@
+plugins {
+    id 'fabric-loom' version '1.9-SNAPSHOT'
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    maven { url "https://maven.shedaniel.me/" }       // Cloth Config
+    maven { url "https://maven.terraformersmc.com/" }  // ModMenu
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // Optional: Guard Villagers — compile-only so dialogues can target GuardEntity
+    compileOnly files("C:/Users/mario/AppData/Roaming/ModrinthApp/profiles/TEST/mods/guardvillagers-2.0.9-1.20.1.jar")
+
+    // MixinExtras — for @WrapWithCondition etc. Bundled with Fabric Loader at runtime.
+    implementation(annotationProcessor("io.github.llamalad7:mixinextras-fabric:0.3.5"))
+
+    // Cloth Config — config screen API (present in TEST mods folder at runtime)
+    modApi("me.shedaniel.cloth:cloth-config-fabric:11.1.136") { exclude(group: "net.fabricmc.fabric-api") }
+
+    // ModMenu — registers our config screen in the mod list
+    modCompileOnly("com.terraformersmc:modmenu:7.2.2")
+}
+
+processResources {
+    inputs.property "version", project.version
+    filteringCharset "UTF-8"
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 17
+}
+
+java {
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${project.base.archivesName.get()}" }
+    }
+}

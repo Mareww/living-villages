@@ -1,0 +1,9 @@
+{
+  "required": false,
+  "package": "com.livingvillages.mixin.compat",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}
