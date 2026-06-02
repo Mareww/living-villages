@@ -1230,6 +1230,8 @@ public class CampfireConversation {
     private static final Map<Integer, long[]> CONVERSATIONS = new HashMap<>();
     // pair key (min_id * 1e6 + max_id) → tick when this pair may talk again
     private static final Map<Long, Long> TALKED_RECENTLY = new HashMap<>();
+    // joiner villager ID → [speakerA ID, speakerB ID, timeoutTick]
+    private static final Map<Integer, long[]> PENDING_JOINERS = new HashMap<>();
     private static long lastCleanupTick = -1;
 
     /** Returns true if this villager is mid-group-conversation and should be frozen. */
@@ -1309,29 +1311,29 @@ public class CampfireConversation {
         }
         // When a conversation expires: clear INTERACTION_TARGET, record cooldown,
         // and nudge each villager away from their partner so they visibly "leave".
+        // Collect pairs that just expired so we can try a joiner after cleanup
+        List<int[]> expiredPairs = new java.util.ArrayList<>();
         CONVERSATIONS.entrySet().removeIf(e -> {
             if (now < e.getValue()[1]) return false;
             int vid = e.getKey();
             int partnerId = (int) e.getValue()[0];
             markTalkedRecently(vid, partnerId, now);
 
+            // Record once per pair (lower ID wins) for joiner check below
+            if (vid < partnerId) expiredPairs.add(new int[]{vid, partnerId});
+
             var entity = world.getEntityById(vid);
             var partner = world.getEntityById(partnerId);
             if (entity instanceof VillagerEntity v) {
                 v.getBrain().forget(MemoryModuleType.INTERACTION_TARGET);
-                // Reset ConversationBehavior cooldown — it expired during the conversation
-                // so without this the villager immediately starts another one
                 ((com.livingvillages.duck.IVillagerBehaviorState) v)
-                        .livingvillages$setConversationCooldown(200 + world.random.nextInt(200)); // 10-20s post-conv cooldown
+                        .livingvillages$setConversationCooldown(200 + world.random.nextInt(200));
                 v.getBrain().forget(MemoryModuleType.LOOK_TARGET);
-                // Walk a few blocks away from the partner
                 if (partner != null) {
                     double dx = v.getX() - partner.getX();
                     double dz = v.getZ() - partner.getZ();
                     double len = Math.sqrt(dx * dx + dz * dz);
-                    double dist = 4.0 + world.random.nextDouble() * 4.0;
                     if (len > 0.1) {
-                        // Walk 8-14 blocks away so the vanilla Meet task can't immediately pull them back
                         double farDist = 8.0 + world.random.nextDouble() * 6.0;
                         net.minecraft.util.math.BlockPos away = new net.minecraft.util.math.BlockPos(
                                 (int)(v.getX() + dx / len * farDist),
@@ -1339,15 +1341,27 @@ public class CampfireConversation {
                                 (int)(v.getZ() + dz / len * farDist));
                         v.getBrain().remember(MemoryModuleType.WALK_TARGET,
                                 new WalkTarget(new net.minecraft.entity.ai.brain.BlockPosLookTarget(away), 0.55f, 2));
-                        // Also clear INTERACTION_TARGET so vanilla Meet doesn't re-engage immediately
                         v.getBrain().forget(MemoryModuleType.INTERACTION_TARGET);
                     }
                 }
             }
             return true;
         });
+        // After cleanup: for each pair that just finished, give a nearby bystander a chance to jump in
+        for (int[] pair : expiredPairs) {
+            tryJoinerPickup(pair[0], pair[1], world, now);
+        }
+
         TALKED_RECENTLY.entrySet().removeIf(e -> now >= e.getValue());
         PANIC_BUBBLE.entrySet().removeIf(e -> now >= e.getValue());
+        PENDING_JOINERS.entrySet().removeIf(e -> {
+            long[] d = e.getValue();
+            if (now >= d[2]) return true; // timed out
+            var a = world.getEntityById((int) d[0]);
+            var b = world.getEntityById((int) d[1]);
+            return (!(a instanceof net.minecraft.entity.Entity) || !a.isAlive())
+                || (!(b instanceof net.minecraft.entity.Entity) || !b.isAlive());
+        });
 
         // Praise: villagers walk toward player and show bubbles after raid victory
         PRAISE_STATE.entrySet().removeIf(e -> {
@@ -1665,6 +1679,114 @@ public class CampfireConversation {
         if (VILLAGER_BUBBLE.getOrDefault(villager.getId(), 0L) > now) return;
         String[] h = cfgHums();
         spawnBubble(villager, h[villager.getRandom().nextInt(h.length)], 40, world, now);
+    }
+
+    /** Picks a nearby bystander to walk over and join the A-B conversation organically. */
+    public static void tryScheduleJoiner(VillagerEntity speaker, VillagerEntity target, ServerWorld world) {
+        if (world.random.nextFloat() > 0.4f) return;
+        long now = world.getTime();
+        List<VillagerEntity> bystanders = world.getEntitiesByClass(VillagerEntity.class,
+                speaker.getBoundingBox().expand(12.0),
+                v -> v != speaker && v != target && v.isAlive() && !v.isBaby() && !v.isSleeping()
+                        && ((IVillagerBehaviorState) v).livingvillages$getCampfireTarget() == null
+                        && !PENDING_JOINERS.containsKey(v.getId())
+                        && getConversationPartner(v.getId(), world, now) == null
+                        && !isInGroupConversation(v.getId(), now));
+        if (bystanders.isEmpty()) return;
+        VillagerEntity joiner = bystanders.get(world.random.nextInt(bystanders.size()));
+        PENDING_JOINERS.put(joiner.getId(), new long[]{speaker.getId(), target.getId(), now + 600L});
+    }
+
+    /** Returns joiner data for this villager, or null if they are not a pending joiner. */
+    public static long[] getJoinerData(int villagerNetId) {
+        return PENDING_JOINERS.get(villagerNetId);
+    }
+
+    /** Cancels this villager's pending joiner status. */
+    public static void removeJoiner(int villagerNetId) {
+        PENDING_JOINERS.remove(villagerNetId);
+    }
+
+    /** C arrived and A-B finished — start the group thread with C speaking first. */
+    public static void triggerJoinerGroup(VillagerEntity joiner, VillagerEntity speakerA,
+                                           VillagerEntity speakerB, ServerWorld world) {
+        long now = world.getTime();
+        if (isInGroupConversation(joiner.getId(), now)
+                || isInGroupConversation(speakerA.getId(), now)
+                || isInGroupConversation(speakerB.getId(), now)) return;
+
+        long areaKey = campfireKey(joiner.getBlockPos());
+        if (GROUP_COOLDOWN.getOrDefault(areaKey, 0L) > now) return;
+
+        String[] thread = GROUP_THREADS[world.random.nextInt(GROUP_THREADS.length)];
+        int lineCount = Math.min(thread.length, 4 + world.random.nextInt(2));
+
+        java.util.List<VillagerEntity> group = new java.util.ArrayList<>();
+        group.add(joiner); group.add(speakerA); group.add(speakerB);
+
+        // Override any walk-away impulse CONVERSATIONS removal may have just set
+        for (VillagerEntity v : group) {
+            v.getNavigation().stop();
+            v.getBrain().forget(MemoryModuleType.WALK_TARGET);
+        }
+
+        int duration = 130;
+        int gap = 15;
+        long tick = now;
+        for (int i = 0; i < lineCount; i++) {
+            VillagerEntity speaker = group.get(i % group.size());
+            int textIdx = GROUP_LINE_TEXTS.size();
+            GROUP_LINE_TEXTS.add(thread[i]);
+            GROUP_PENDING_LINES.add(new long[]{tick, speaker.getId(), textIdx});
+            tick += duration + gap;
+        }
+
+        long endTick = tick + 20L;
+        for (VillagerEntity v : group) GROUP_FROZEN.put(v.getId(), endTick);
+        GROUP_COOLDOWN.put(areaKey, endTick + 3000L);
+    }
+
+    /**
+     * After A-B finish talking, scan nearby villagers — if one is within 6 blocks
+     * and hasn't talked to either recently, they jump in and start a new exchange.
+     * 40% chance. This creates the organic trio/chain effect without any navigation.
+     */
+    private static void tryJoinerPickup(int vidA, int vidB, ServerWorld world, long now) {
+        if (world.random.nextFloat() > 0.4f) return;
+
+        var entityA = world.getEntityById(vidA);
+        var entityB = world.getEntityById(vidB);
+        if (!(entityA instanceof VillagerEntity vA) || !vA.isAlive()) return;
+        if (!(entityB instanceof VillagerEntity vB) || !vB.isAlive()) return;
+
+        double midX = (vA.getX() + vB.getX()) / 2.0;
+        double midY = (vA.getY() + vB.getY()) / 2.0;
+        double midZ = (vA.getZ() + vB.getZ()) / 2.0;
+
+        List<VillagerEntity> bystanders = world.getEntitiesByClass(VillagerEntity.class,
+                new net.minecraft.util.math.Box(midX - 6, midY - 2, midZ - 6,
+                                                midX + 6, midY + 2, midZ + 6),
+                v -> v != vA && v != vB && v.isAlive() && !v.isBaby() && !v.isSleeping()
+                        && ((IVillagerBehaviorState) v).livingvillages$getCampfireTarget() == null
+                        && CONVERSATIONS.get(v.getId()) == null
+                        && !isInGroupConversation(v.getId(), now)
+                        && VILLAGER_BUBBLE.getOrDefault(v.getId(), 0L) <= now);
+
+        if (bystanders.isEmpty()) return;
+
+        VillagerEntity joiner = bystanders.get(world.random.nextInt(bystanders.size()));
+
+        // Pick whichever of A or B the joiner hasn't spoken to recently
+        VillagerEntity target;
+        boolean recentA = talkedRecently(joiner.getId(), vA.getId(), now);
+        boolean recentB = talkedRecently(joiner.getId(), vB.getId(), now);
+        if (recentA && recentB) return; // joiner knows both too well right now
+        target = recentA ? vB : vA;
+
+        // Face each other and start a fresh roam exchange
+        joiner.getLookControl().lookAt(target.getX(), target.getEyeY(), target.getZ());
+        target.getLookControl().lookAt(joiner.getX(), joiner.getEyeY(), joiner.getZ());
+        spawnRoamBubbles(joiner, target, world);
     }
 
     /** Schedules a bystander to join in ~5 seconds after the main exchange. */

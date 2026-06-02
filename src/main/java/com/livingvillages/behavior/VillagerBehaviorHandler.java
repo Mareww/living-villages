@@ -31,6 +31,67 @@ public class VillagerBehaviorHandler {
             return;
         }
 
+        // Joiner approach — walk toward the A-B midpoint, wait, then trigger group thread
+        long[] joinerData = CampfireConversation.getJoinerData(villager.getId());
+        if (joinerData != null) {
+            var entityA = world.getEntityById((int) joinerData[0]);
+            var entityB = world.getEntityById((int) joinerData[1]);
+            VillagerEntity speakerA = (entityA instanceof VillagerEntity) ? (VillagerEntity) entityA : null;
+            VillagerEntity speakerB = (entityB instanceof VillagerEntity) ? (VillagerEntity) entityB : null;
+
+            if (speakerA == null || !speakerA.isAlive() || speakerB == null || !speakerB.isAlive()
+                    || villager.isSleeping()) {
+                CampfireConversation.removeJoiner(villager.getId());
+                // fall through to normal behavior below
+            } else {
+                double midX = (speakerA.getX() + speakerB.getX()) / 2.0;
+                double midY =  speakerA.getY();
+                double midZ = (speakerA.getZ() + speakerB.getZ()) / 2.0;
+
+                // Stand 1.8 blocks perpendicular to A-B — triangle formation
+                double abX = speakerB.getX() - speakerA.getX();
+                double abZ = speakerB.getZ() - speakerA.getZ();
+                double abLen = Math.sqrt(abX * abX + abZ * abZ);
+                double targetX = midX, targetZ = midZ;
+                if (abLen > 0.1) {
+                    double perpX = -abZ / abLen;
+                    double perpZ =  abX / abLen;
+                    double dot = (villager.getX() - midX) * perpX + (villager.getZ() - midZ) * perpZ;
+                    double side = dot >= 0 ? 1.8 : -1.8;
+                    targetX = midX + perpX * side;
+                    targetZ = midZ + perpZ * side;
+                }
+
+                double dx = villager.getX() - targetX;
+                double dz = villager.getZ() - targetZ;
+                if (dx * dx + dz * dz > 4.0) {
+                    // Still walking — set nav target toward triangle slot
+                    net.minecraft.util.math.BlockPos dest = new net.minecraft.util.math.BlockPos(
+                            (int) targetX, (int) midY, (int) targetZ);
+                    villager.getBrain().remember(
+                            net.minecraft.entity.ai.brain.MemoryModuleType.WALK_TARGET,
+                            new net.minecraft.entity.ai.brain.WalkTarget(
+                                    new net.minecraft.entity.ai.brain.BlockPosLookTarget(dest), 0.5f, 1));
+                    villager.getLookControl().lookAt(midX, midY + 1.6, midZ);
+                } else {
+                    // Arrived — hold position and watch the conversation
+                    villager.getNavigation().stop();
+                    villager.getBrain().forget(
+                            net.minecraft.entity.ai.brain.MemoryModuleType.WALK_TARGET);
+                    villager.getLookControl().lookAt(midX, midY + 1.6, midZ);
+
+                    // Once A-B are done, step in and start the group thread
+                    boolean convActive = CampfireConversation.getConversationPartner(
+                            speakerA.getId(), world, tickNow) != null;
+                    if (!convActive) {
+                        CampfireConversation.removeJoiner(villager.getId());
+                        CampfireConversation.triggerJoinerGroup(villager, speakerA, speakerB, world);
+                    }
+                }
+                return;
+            }
+        }
+
         VillagerEntity conversationPartner = CampfireConversation.getConversationPartner(
                 villager.getId(), world, tickNow);
         if (conversationPartner != null) {
@@ -45,6 +106,13 @@ public class VillagerBehaviorHandler {
                     conversationPartner.getX(),
                     conversationPartner.getEyeY(),
                     conversationPartner.getZ());
+
+            // Kill horizontal velocity every tick — prevents being drifted by passing entities
+            net.minecraft.util.math.Vec3d vel = villager.getVelocity();
+            if (Math.abs(vel.x) > 0.005 || Math.abs(vel.z) > 0.005) {
+                villager.setVelocity(0, vel.y, 0);
+                villager.velocityModified = true;
+            }
 
             double dist = villager.distanceTo(conversationPartner);
             if (dist > 2.2) {
@@ -68,14 +136,9 @@ public class VillagerBehaviorHandler {
                                     new net.minecraft.entity.ai.brain.BlockPosLookTarget(backPos), 0.35f, 1));
                 }
             } else {
-                // Good position — stop and resist further pushes by zeroing horizontal velocity
+                // Good position — stop
                 villager.getNavigation().stop();
                 villager.getBrain().forget(net.minecraft.entity.ai.brain.MemoryModuleType.WALK_TARGET);
-                net.minecraft.util.math.Vec3d vel = villager.getVelocity();
-                if (Math.abs(vel.x) > 0.01 || Math.abs(vel.z) > 0.01) {
-                    villager.setVelocity(0, vel.y, 0); // kill horizontal drift from pushes
-                    villager.velocityModified = true;
-                }
             }
             return;
         }
@@ -109,36 +172,12 @@ public class VillagerBehaviorHandler {
             }
         }
 
-        // Anti-bell-clustering: nudge idle villagers away from the meeting point.
-        // Runs AFTER conversation freeze (which returns early), so it never fires mid-conversation.
-        // Every ~2 minutes per villager, with 50% chance = avg once per 4 minutes.
+        // Anti-bell-clustering: wipe MEETING_POINT during IDLE so the vanilla
+        // VillagerWanderAroundTask has no bell to gravitate toward.
         if (villager.getBrain().hasActivity(net.minecraft.entity.ai.brain.Activity.IDLE)
                 && state.livingvillages$getCampfireTarget() == null
-                && !villager.isSleeping()
-                && !CampfireConversation.isInGroupConversation(villager.getId(), tickNow)
-                && (tickNow + villager.getId()) % 2400 == 0
-                && world.random.nextFloat() < 0.5f
-                && villager.getBrain().getOptionalRegisteredMemory(
-                        net.minecraft.entity.ai.brain.MemoryModuleType.INTERACTION_TARGET).isEmpty()) {
-            double rx = (world.random.nextDouble() - 0.5) * 20;
-            double rz = (world.random.nextDouble() - 0.5) * 20;
-            net.minecraft.util.math.BlockPos wander = villager.getBlockPos().add((int) rx, 0, (int) rz);
-            villager.getBrain().remember(net.minecraft.entity.ai.brain.MemoryModuleType.WALK_TARGET,
-                    new net.minecraft.entity.ai.brain.WalkTarget(
-                            new net.minecraft.entity.ai.brain.BlockPosLookTarget(wander), 0.4f, 4));
-        }
-
-        // Group conversation — when 3+ villagers are nearby, occasionally start a thread
-        if ((tickNow + villager.getId()) % 2400 == 0
-                && world.random.nextFloat() < 0.35f
-                && !villager.isBaby() && !villager.isSleeping()
-                && state.livingvillages$getCampfireTarget() == null
-                && conversationPartner == null
-                && !CampfireConversation.isInGroupConversation(villager.getId(), tickNow)) {
-            long nearby = world.getEntitiesByClass(net.minecraft.entity.passive.VillagerEntity.class,
-                    villager.getBoundingBox().expand(6.0),
-                    v -> v != villager && v.isAlive() && !v.isBaby()).stream().count();
-            if (nearby >= 2) CampfireConversation.tryGroupConversation(villager, world);
+                && !villager.isSleeping()) {
+            villager.getBrain().forget(net.minecraft.entity.ai.brain.MemoryModuleType.MEETING_POINT);
         }
 
         // General chatter — every ~30 seconds say a solo or one-sided line

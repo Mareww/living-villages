@@ -134,18 +134,7 @@ public class ConversationBehavior {
             CampfireConversation.spawnRoamBubbles(villager, target, world);
         }
 
-        // 25% chance a nearby bystander overhears and joins
-        if (world.random.nextFloat() < 0.25f) {
-            List<VillagerEntity> bystanders = world.getEntitiesByClass(VillagerEntity.class,
-                    villager.getBoundingBox().expand(8.0),
-                    v -> v != villager && v != target && v.isAlive()
-                            && ((IVillagerBehaviorState) v).livingvillages$getCampfireTarget() == null);
-            if (!bystanders.isEmpty()) {
-                VillagerEntity joiner = bystanders.get(world.random.nextInt(bystanders.size()));
-                String[] jl = CampfireConversation.getJoinLines();
-                String joinLine = jl[world.random.nextInt(jl.length)];
-                CampfireConversation.scheduleJoin(joiner, joinLine, world);
-            }
-        }
+        // Chance a nearby bystander notices and walks over to form a trio
+        CampfireConversation.tryScheduleJoiner(villager, target, world);
     }
 }

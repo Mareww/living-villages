@@ -17,7 +17,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class InGameHudMixin {
 
     private static final Identifier ICONS     = new Identifier("textures/gui/icons.png");
-    private static final float      TEXT_SCALE = 0.75f;
+    private static final float      TEXT_SCALE = 0.65f;
     // Target bar dimensions — vanilla is 182×5
     private static final int        BAR_W      = 150;
     private static final int        BAR_H      = 5;
@@ -79,16 +79,22 @@ public class InGameHudMixin {
         // ── Label — to the left, vertically centred with bar ─────────────────
         int labelY = barY - (int)((tr.fontHeight * TEXT_SCALE - BAR_H) / 2) - 1;
 
-        // Transparent black background box — 1px bigger on each side, shifted 1px down
-        context.fill(
-                startX - 2,
-                labelY + 1,
-                startX + scaledLblW + 2,
-                labelY + (int)(tr.fontHeight * TEXT_SCALE) + 2,
-                0x80000000);
+        // Snap to integer pixels to avoid sub-pixel blurring from fractional scale
+        int tx = Math.round(startX + 1);
+        int ty = Math.round(labelY + 1);
 
+        // Black text at 4 offsets (outline) so it peeks out around the colored letters
+        for (int[] o : new int[][]{{-1,0},{1,0},{0,-1},{0,1}}) {
+            context.getMatrices().push();
+            context.getMatrices().translate(tx + o[0], ty + o[1], 0);
+            context.getMatrices().scale(TEXT_SCALE, TEXT_SCALE, 1f);
+            context.drawText(tr, label, 0, 0, 0xFF000000, false);
+            context.getMatrices().pop();
+        }
+
+        // Colored text on top
         context.getMatrices().push();
-        context.getMatrices().translate(startX, labelY + 1, 0);
+        context.getMatrices().translate(tx, ty, 0);
         context.getMatrices().scale(TEXT_SCALE, TEXT_SCALE, 1f);
         context.drawText(tr, label, 0, 0, color, false);
         context.getMatrices().pop();

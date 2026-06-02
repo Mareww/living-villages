@@ -113,14 +113,17 @@ public class WeatherBehavior {
                     state.livingvillages$setShelterTarget(shelter);
 
                 } else {
-                    // Re-search every 100 ticks (staggered) if target is null or unreachable
                     BlockPos target = state.livingvillages$getShelterTarget();
+                    // Retry every slow-path tick when homeless (target null), otherwise stagger
                     long stagger = (world.getTime() + villager.getId()) % RETRY_TICKS;
-                    if (stagger == 0 && (target == null
+                    boolean shouldRetry = target == null || stagger == 0;
+                    if (shouldRetry && (target == null
                             || villager.getNavigation().findPathTo(target, 0) == null)) {
                         state.livingvillages$setShelterTarget(null);
-                        BlockPos shelter = findShelter(villager, world).orElseGet(
-                                () -> homeFallback(villager, world));
+                        BlockPos shelter = findShelter(villager, world)
+                                .orElseGet(() -> homeFallback(villager, world));
+                        // Last resort: search wider with relaxed path check
+                        if (shelter == null) shelter = lastResortShelter(villager, world);
                         state.livingvillages$setShelterTarget(shelter);
                     }
                 }
@@ -235,6 +238,23 @@ public class WeatherBehavior {
         return world.getBlockState(pos).isAir()
                 && world.getBlockState(pos.up()).isAir()
                 && !isExposedToSky(world, pos);
+    }
+
+    /** Wider search with no path validation — finds any non-sky-exposed air block up to 48 blocks away. */
+    private static BlockPos lastResortShelter(VillagerEntity villager, ServerWorld world) {
+        BlockPos origin = villager.getBlockPos();
+        for (int r = 1; r <= 48; r += 2) {
+            for (int dx = -r; dx <= r; dx += 2) {
+                for (int dz = -r; dz <= r; dz += 2) {
+                    if (Math.abs(dx) != r && Math.abs(dz) != r) continue;
+                    for (int dy = -1; dy <= 2; dy++) {
+                        BlockPos candidate = origin.add(dx, dy, dz);
+                        if (isSheltered(world, candidate)) return candidate;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     private static void closeNearbyDoors(VillagerEntity villager, ServerWorld world) {

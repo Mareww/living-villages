@@ -114,7 +114,7 @@ public class CampfireBehavior {
 
         // ── Slow path: evening decision ───────────────────────────────────────────
         var brain = villager.getBrain();
-        if (brain.hasActivity(Activity.PANIC)) {
+        if (brain.hasActivity(Activity.PANIC) || villager.isSleeping()) {
             state.livingvillages$setCampfireCooldown(COOLDOWN);
             return;
         }
